@@ -43,12 +43,12 @@
 #include "npbparams.h"
 #include <stdlib.h>
 #include <stdio.h>
-#include <sycl/sycl.hpp>
+// #include <sycl/sycl.hpp>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
-using namespace sycl;
+// using namespace sycl;
 /*****************************************************************/
 /* For serial IS, buckets are not really req'd to solve NPB1 IS  */
 /* spec, but their use on some machines improves performance, on */
@@ -511,6 +511,26 @@ void alloc_key_buff( void )
     #pragma omp parallel for
     for( i=0; i<NUM_KEYS; i++ )
         key_buff2[i] = 0;
+
+    /*---- SYCL CODE ----*/
+    /* 
+    // Initialize a queue to execute SYCL commands
+    queue q;
+
+    // Submit a command group to the queue
+    q.submit([&](handler& h) {
+        // Access the buffer with write access
+        auto key_buff2_acc = buffer<int, 1>(key_buff2, range<1>(NUM_KEYS));
+
+        // Actual kernel
+        h.parallel_for<class init_key_buff2>(range<1>(NUM_KEYS), [=](id<1> idx) {
+            key_buff2_acc[idx] = 0;
+        });
+    });
+
+    // Queue waits for all command groups to finish
+    q.wait();
+    */
 
 #else /*USE_BUCKETS*/
 

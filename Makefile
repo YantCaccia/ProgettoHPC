@@ -66,7 +66,7 @@ veryclean: clean
 	- rm -f bin/ep.* bin/cg.* bin/ua.* bin/dc.* bin/ADC.*
 
 header:
-	@ sys/print_header
+	# @ sys/print_header
 
 
 

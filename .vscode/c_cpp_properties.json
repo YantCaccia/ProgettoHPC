@@ -8,7 +8,6 @@
                 "/opt/intel/oneapi/dpl/2022.3/include/pstl_offload"
             ],
             "defines": [],
-            "compilerPath": "/usr/bin/clang",
             "cStandard": "c17",
             "cppStandard": "c++17",
             "intelliSenseMode": "linux-clang-x64"
