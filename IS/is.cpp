@@ -466,10 +466,10 @@ void	create_seq( double seed, double a )
 	{
 	    x = randlc(&s, &an);
 	    x += randlc(&s, &an);
-    	    x += randlc(&s, &an);
+        x += randlc(&s, &an);
 	    x += randlc(&s, &an);  
 
-            key_array[i] = k*x;
+        key_array[i] = k*x;
 	}
     } /*omp parallel*/
 }
@@ -508,10 +508,27 @@ void alloc_key_buff( void )
         bucket_size[i] = (INT_TYPE *)alloc_mem(sizeof(INT_TYPE) * NUM_BUCKETS);
     }
 
-    #pragma omp parallel for
+    /* #pragma omp parallel for
     for( i=0; i<NUM_KEYS; i++ )
         key_buff2[i] = 0;
+    */
+   
+    /* --- SYCL CODE --- */
+    queue q(gpu_selector_v);
+    
+    INT_TYPE *key_buff2_device = malloc_device<INT_TYPE>(SIZE_OF_BUFFERS, q); 
+    range<1> num_items{SIZE_OF_BUFFERS};
 
+    q.submit([&] (handler& h){
+        h.parallel_for(num_items, [=] (item<1> i){
+            key_buff2_device[i]=0;
+        });
+    });
+    q.wait();
+
+    q.memcpy(key_buff2, key_buff2_device, SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
+    free(key_buff2_device, q);
+    /* END OF SYCL CODE*/
 #else /*USE_BUCKETS*/
 
     key_buff1_aptr = (INT_TYPE **)alloc_mem(sizeof(INT_TYPE *) * num_threads);
