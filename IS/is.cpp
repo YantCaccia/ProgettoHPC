@@ -517,10 +517,10 @@ void alloc_key_buff( void )
     queue q(gpu_selector_v);
     
     INT_TYPE *key_buff2_device = malloc_device<INT_TYPE>(SIZE_OF_BUFFERS, q); 
-    range<1> num_items{SIZE_OF_BUFFERS};
+    range<1> num_items(SIZE_OF_BUFFERS);
 
     q.submit([&] (handler& h){
-        h.parallel_for(num_items, [=] (item<1> i){
+        h.parallel_for(num_items, [=] (id<1> i){
             key_buff2_device[i]=0;
         });
     });
@@ -560,7 +560,8 @@ void full_verify( void )
 
 #ifdef USE_BUCKETS
 
-    /* Buckets are already sorted.  Sorting keys within each bucket */
+/* Buckets are already sorted.  Sorting keys within each bucket */
+/*
 #ifdef SCHED_CYCLIC
     #pragma omp parallel for private(i,j,k,k1) schedule(static,1)
 #else
@@ -574,8 +575,31 @@ void full_verify( void )
             key_array[k] = key_buff2[i];
         }
     }
+    */
 
-#else
+    /* --- SYCL CODE --- */
+    // TODO: check if correct & if it works
+    queue q(gpu_selector_v);
+    
+    INT_TYPE *key_array_device = malloc_device<INT_TYPE>(SIZE_OF_BUFFERS, q); 
+    range<1> num_iterations(NUM_BUCKETS); // check this
+
+    q.submit([&] (handler& h){
+        h.parallel_for(num_iterations, [=] (id<1> j){
+            k1 = (j > 0)? bucket_ptrs[j-1] : 0;
+            for ( i = k1; i < bucket_ptrs[j]; i++ ) {
+                k = --key_buff_ptr_global[key_buff2[i]];
+                key_array_device[k] = key_buff2[i];
+            }
+        });
+    });
+    q.wait();
+
+    q.memcpy(key_array, key_array_device, SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
+    free(key_array_device);
+    /* END OF SYCL CODE*/
+
+#else /*USE_BUCKETS disabled*/
 
 #pragma omp parallel private(i,j,k,k1,k2)
   {
@@ -609,11 +633,69 @@ void full_verify( void )
 
 /*  Confirm keys correctly sorted: count incorrectly sorted keys, if any */
 
+    // j = 0;
+    // #pragma omp parallel for reduction(+:j)
+    // for( i=1; i<NUM_KEYS; i++ )
+    //     if( key_array[i-1] > key_array[i] )
+    //         j++;
+    
+    /* --- SYCL CODE --- */ // this will be HUGE SMH
+
+    // Query the maximum work-group size
+    size_t max_work_group_size = device.get_info<info::device::max_work_group_size>();
+
+    // Choose an appropriate work-group size (power of two, not exceeding the max supported)
+    size_t WG_SIZE = max_work_group_size;
+
+    // Compute the number of work-groups needed
+    size_t num_work_groups = ceil((NUM_KEYS - 1) / WG_SIZE);
+
+    // Allocate USM shared memory for the partial results
+    int* partial_sums = malloc_shared<INT_TYPE>(num_work_groups, q);
+
+    // Initialize partial sums to 0
+    std::fill(partial_sums, partial_sums + num_work_groups, 0);
+
+    // First stage: compute partial sums in parallel
+    q.submit([&](handler& h) {
+        h.parallel_for(nd_range<1>(range<1>(NUM_KEYS), range<1>(WG_SIZE)), [=](nd_item<1> item) {
+            size_t global_id = item.get_global_id(0);
+            size_t local_id = item.get_local_id(0);
+            size_t group_id = item.get_group(0);
+
+            // Use local memory for reduction within a work-group
+            local_accessor<int, 1> local_sum(range<1>(1), h);
+
+            if (local_id == 0) {
+                local_sum[0] = 0;
+            }
+
+            item.barrier(access::fence_space::local_space);
+
+            // Compute local sum
+            if (global_id < NUM_KEYS - 1 && key_array[global_id] > key_array[global_id + 1]) {
+                local_sum[0] += 1;
+            }
+
+            item.barrier(access::fence_space::local_space);
+
+            // Store the local sum in the partial sums array
+            if (local_id == 0) {
+                partial_sums[group_id] = local_sum[0];
+            }
+        });
+    }).wait();
+
+    // Second stage: combine partial sums on the host
     j = 0;
-    #pragma omp parallel for reduction(+:j)
-    for( i=1; i<NUM_KEYS; i++ )
-        if( key_array[i-1] > key_array[i] )
-            j++;
+    for (i = 0; i < num_work_groups; i++) {
+        j += partial_sums[i];
+    }
+
+    // Free USM memory
+    free(partial_sums, q);
+
+    /* END OF SYCL CODE */
 
     if( j != 0 )
         printf( "Full_verify: number of keys out of sort: %ld\n", (long)j );
