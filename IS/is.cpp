@@ -582,21 +582,36 @@ void full_verify( void )
     queue q(gpu_selector_v);
     
     INT_TYPE *key_array_device = malloc_device<INT_TYPE>(SIZE_OF_BUFFERS, q); 
-    range<1> num_iterations(NUM_BUCKETS); // check this
+    
+    INT_TYPE *bucket_ptrs_device = malloc_device<INT_TYPE>(NUM_BUCKETS, q);
+    q.memcpy(bucket_ptrs_device, bucket_ptrs, NUM_BUCKETS * sizeof(INT_TYPE));
+
+    INT_TYPE *key_buff_ptr_global_device = malloc_device<INT_TYPE>(MAX_KEY, q);
+    q.memcpy(key_buff_ptr_global_device, key_buff_ptr_global, MAX_KEY * sizeof(INT_TYPE));
+
+    INT_TYPE *key_buff2_device = malloc_device<INT_TYPE>(MAX_KEY, q);
+    q.memcpy(key_buff_ptr_global_device, key_buff_ptr_global, MAX_KEY * sizeof(INT_TYPE));
+
+
+    range<1> num_iterations(NUM_BUCKETS);
 
     q.submit([&] (handler& h){
         h.parallel_for(num_iterations, [=] (id<1> j){
-            k1 = (j > 0)? bucket_ptrs[j-1] : 0;
-            for ( i = k1; i < bucket_ptrs[j]; i++ ) {
-                k = --key_buff_ptr_global[key_buff2[i]];
-                key_array_device[k] = key_buff2[i];
+            INT_TYPE k, k1;
+            k1 = (j > 0)? bucket_ptrs_device[j-1] : 0;
+            for ( INT_TYPE i = k1; i < bucket_ptrs_device[j]; i++ ) {
+                k = --key_buff_ptr_global_device[key_buff2_device[i]];
+                key_array_device[k] = key_buff2_device[i];
             }
         });
     });
     q.wait();
 
     q.memcpy(key_array, key_array_device, SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
-    free(key_array_device);
+    q.memcpy(key_buff_ptr_global, key_buff_ptr_global_device, MAX_KEY * sizeof(INT_TYPE)).wait();
+    free(key_array_device, q);
+    free(key_buff_ptr_global_device, q);
+    free(key_buff2_device, q);
     /* END OF SYCL CODE*/
 
 #else /*USE_BUCKETS disabled*/
@@ -639,61 +654,26 @@ void full_verify( void )
     //     if( key_array[i-1] > key_array[i] )
     //         j++;
     
-    /* --- SYCL CODE --- */ // this will be HUGE SMH
+    /* --- SYCL CODE --- */
 
-    // Query the maximum work-group size
-    size_t max_work_group_size = device.get_info<info::device::max_work_group_size>();
+    buffer<INT_TYPE> sumBuf { &j, 1 };
 
-    // Choose an appropriate work-group size (power of two, not exceeding the max supported)
-    size_t WG_SIZE = max_work_group_size;
+    buffer<INT_TYPE> key_array_buf{key_array, range<1>(NUM_KEYS)};
 
-    // Compute the number of work-groups needed
-    size_t num_work_groups = ceil((NUM_KEYS - 1) / WG_SIZE);
+    q.submit([&](handler& cgh) {
+        auto key_array_acc = key_array_buf.get_access<access_mode::read>(cgh);
 
-    // Allocate USM shared memory for the partial results
-    int* partial_sums = malloc_shared<INT_TYPE>(num_work_groups, q);
+        auto sumReduction = reduction(sumBuf, cgh, plus<>());
 
-    // Initialize partial sums to 0
-    std::fill(partial_sums, partial_sums + num_work_groups, 0);
-
-    // First stage: compute partial sums in parallel
-    q.submit([&](handler& h) {
-        h.parallel_for(nd_range<1>(range<1>(NUM_KEYS), range<1>(WG_SIZE)), [=](nd_item<1> item) {
-            size_t global_id = item.get_global_id(0);
-            size_t local_id = item.get_local_id(0);
-            size_t group_id = item.get_group(0);
-
-            // Use local memory for reduction within a work-group
-            local_accessor<int, 1> local_sum(range<1>(1), h);
-
-            if (local_id == 0) {
-                local_sum[0] = 0;
-            }
-
-            item.barrier(access::fence_space::local_space);
-
-            // Compute local sum
-            if (global_id < NUM_KEYS - 1 && key_array[global_id] > key_array[global_id + 1]) {
-                local_sum[0] += 1;
-            }
-
-            item.barrier(access::fence_space::local_space);
-
-            // Store the local sum in the partial sums array
-            if (local_id == 0) {
-                partial_sums[group_id] = local_sum[0];
+        cgh.parallel_for(range<1> { NUM_KEYS - 1}, sumReduction, [=](id<1> i, auto& sum) {
+            if(key_array_acc[i]>key_array_acc[i+1]){
+                sum += 1;
             }
         });
-    }).wait();
 
-    // Second stage: combine partial sums on the host
-    j = 0;
-    for (i = 0; i < num_work_groups; i++) {
-        j += partial_sums[i];
-    }
+    });
 
-    // Free USM memory
-    free(partial_sums, q);
+    j = sumBuf.get_host_access()[0];
 
     /* END OF SYCL CODE */
 
