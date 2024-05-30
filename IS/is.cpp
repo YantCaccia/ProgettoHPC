@@ -315,39 +315,41 @@ void c_print_results( char   *name,
 /*************    portable random number generator    ************/
 /*****************************************************************/
 
-static int      KS=0;
-static double	R23, R46, T23, T46;
-#pragma omp threadprivate(KS, R23, R46, T23, T46)
+//static int      KS=0;
+//static double	R23, R46, T23, T46;
+//#pragma omp threadprivate(KS, R23, R46, T23, T46)
 
-double	randlc( double *X, double *A )
-{
-      double		T1, T2, T3, T4;
-      double		A1;
-      double		A2;
-      double		X1;
-      double		X2;
-      double		Z;
-      int     		i, j;
+SYCL_EXTERNAL double	randlc( double *X, double *A ){
+    int KS=0;
+    double	R23, R46, T23, T46;
 
-      if (KS == 0) 
-      {
-        R23 = 1.0;
-        R46 = 1.0;
-        T23 = 1.0;
-        T46 = 1.0;
-    
-        for (i=1; i<=23; i++)
-        {
-          R23 = 0.50 * R23;
-          T23 = 2.0 * T23;
-        }
-        for (i=1; i<=46; i++)
-        {
-          R46 = 0.50 * R46;
-          T46 = 2.0 * T46;
-        }
-        KS = 1;
-      }
+    double		T1, T2, T3, T4;
+    double		A1;
+    double		A2;
+    double		X1;
+    double		X2;
+    double		Z;
+    int     		i, j;
+
+    if (KS == 0) 
+    {
+    R23 = 1.0;
+    R46 = 1.0;
+    T23 = 1.0;
+    T46 = 1.0;
+
+    for (i=1; i<=23; i++)
+    {
+        R23 = 0.50 * R23;
+        T23 = 2.0 * T23;
+    }
+    for (i=1; i<=46; i++)
+    {
+        R46 = 0.50 * R46;
+        T46 = 2.0 * T46;
+    }
+    KS = 1;
+    }
 
 /*  Break A into two parts such that A = 2^23 * A1 + A2 and set X = N.  */
 
@@ -374,8 +376,7 @@ double	randlc( double *X, double *A )
       T4 = j;
       *X = T3 - T46 * T4;
       return(R46 * *X);
-} 
-
+}
 
 
 
@@ -393,11 +394,11 @@ double	randlc( double *X, double *A )
  * to processor rank kn, and which is used as seed for proc kn ran # gen.
  */
 
-double   find_my_seed( int kn,        /* my processor rank, 0<=kn<=num procs */
+SYCL_EXTERNAL double   find_my_seed( int kn,        /* my processor rank, 0<=kn<=num procs */
                        int np,        /* np = num procs                      */
                        long nn,       /* total num of ran numbers, all procs */
                        double s,      /* Ran num seed, for ex.: 314159265.00 */
-                       double a )     /* Ran num gen mult, try 1220703125.00 */
+                       double a)     /* Ran num gen mult, try 1220703125.00 */
 {
 
       double t1,t2;
@@ -414,21 +415,19 @@ double   find_my_seed( int kn,        /* my processor rank, 0<=kn<=num procs */
       while ( kk > 1 ) {
       	 ik = kk / 2;
          if( 2 * ik ==  kk ) {
-            (void)randlc( &t2, &t2 );
+            (void)randlc( &t2, &t2);
 	    kk = ik;
 	 }
 	 else {
-            (void)randlc( &t1, &t2 );
+            (void)randlc( &t1, &t2);
 	    kk = kk - 1;
 	 }
       }
-      (void)randlc( &t1, &t2 );
+      (void)randlc( &t1, &t2);
 
       return( t1 );
 
 }
-
-
 
 /*****************************************************************/
 /*************      C  R  E  A  T  E  _  S  E  Q      ************/
@@ -436,15 +435,15 @@ double   find_my_seed( int kn,        /* my processor rank, 0<=kn<=num procs */
 
 void	create_seq( double seed, double a )
 {
-	double x, s;
+/*	double x, s;
 	INT_TYPE i, k;
 
 #pragma omp parallel private(x,s,i,k)
-    {
+{
 	INT_TYPE k1, k2;
 	double an = a;
 	int myid = 0, num_threads = 1;
-        INT_TYPE mq;
+    INT_TYPE mq;
 
 #ifdef _OPENMP
 	myid = omp_get_thread_num();
@@ -471,7 +470,43 @@ void	create_seq( double seed, double a )
 
         key_array[i] = k*x;
 	}
-    } /*omp parallel*/
+}*/
+
+	INT_TYPE i, k;
+    
+        /* --- SYCL CODE --- */
+    queue q(cpu_selector_v);
+
+	double *an;
+
+    an = malloc_shared<double>(1,q);
+    *an=a;
+
+
+    k = MAX_KEY/4;
+    int *key_array_device = malloc_device<INT_TYPE>(SIZE_OF_BUFFERS, q);
+    
+    q.submit([&] (handler& h){
+
+        h.parallel_for(range<1>{NUM_KEYS}, [=] (item<1> i) {
+            double local_s = find_my_seed( i, NUM_KEYS,
+                                    (long)4*NUM_KEYS, seed, *an); 
+            double x;
+            x = randlc(&local_s, an);
+	        x += randlc(&local_s, an);
+            x += randlc(&local_s, an);
+	        x += randlc(&local_s, an);
+            key_array_device[i] = k*x;
+        });
+    });
+    q.wait();
+
+    q.memcpy(key_array, key_array_device, SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
+
+    free(key_array_device, q);
+    free(an, q);
+    /* END OF SYCL CODE*/
+
 }
 
 
