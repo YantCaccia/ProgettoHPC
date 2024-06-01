@@ -584,13 +584,13 @@ void full_verify( void )
     INT_TYPE *key_array_device = malloc_device<INT_TYPE>(SIZE_OF_BUFFERS, q); 
     
     INT_TYPE *bucket_ptrs_device = malloc_device<INT_TYPE>(NUM_BUCKETS, q);
-    q.memcpy(bucket_ptrs_device, bucket_ptrs, NUM_BUCKETS * sizeof(INT_TYPE));
+    q.memcpy(bucket_ptrs_device, bucket_ptrs, NUM_BUCKETS * sizeof(INT_TYPE)).wait();
 
     INT_TYPE *key_buff_ptr_global_device = malloc_device<INT_TYPE>(MAX_KEY, q);
-    q.memcpy(key_buff_ptr_global_device, key_buff_ptr_global, MAX_KEY * sizeof(INT_TYPE));
+    q.memcpy(key_buff_ptr_global_device, key_buff_ptr_global, MAX_KEY * sizeof(INT_TYPE)).wait();
 
     INT_TYPE *key_buff2_device = malloc_device<INT_TYPE>(MAX_KEY, q);
-    q.memcpy(key_buff_ptr_global_device, key_buff_ptr_global, MAX_KEY * sizeof(INT_TYPE));
+    q.memcpy(key_buff_ptr_global_device, key_buff_ptr_global, MAX_KEY * sizeof(INT_TYPE)).wait();
 
 
     range<1> num_iterations(NUM_BUCKETS);
@@ -675,7 +675,6 @@ void full_verify( void )
     q.wait();
 
     j = sumBuf.get_host_access()[0];
-    free(q);
 
     /* END OF SYCL CODE */
 
@@ -748,46 +747,46 @@ void rank( int iteration )
         work_buff[i] = 0;
 
 /*  Determine the number of keys in each bucket */
-    // #pragma omp for schedule(static)
-    // for( i=0; i<NUM_KEYS; i++ )
-    //     work_buff[key_array[i] >> shift]++;
+    #pragma omp for schedule(static)
+    for( i=0; i<NUM_KEYS; i++ )
+        work_buff[key_array[i] >> shift]++;
 
     /* --- SYCL CODE --- */
 
     // Create a q queue
-    queue q(gpu_selector_v);
+    // queue q(gpu_selector_v);
 
-    // Create a USM device pointer to the work_buff
-    INT_TYPE *work_buff_device = malloc_device<INT_TYPE>(NUM_BUCKETS, q);
+    // // Buffers for arrays
+    // buffer<INT_TYPE> key_array_buf{key_array, range<1>(SIZE_OF_BUFFERS)};
+    // buffer<INT_TYPE> work_buff_buf{work_buff, range<1>(NUM_BUCKETS)};
 
-    // Create a USM device pointer to the key_array
-    INT_TYPE *key_array_device = malloc_device<INT_TYPE>(SIZE_OF_BUFFERS, q);
+    // // Create a range for the number of items
+    // range<1> num_items(NUM_KEYS);
 
-    // Copy the work_buff to the device
-    q.memcpy(work_buff_device, work_buff, NUM_BUCKETS * sizeof(INT_TYPE));
+    // // Submit the kernel with a parallel for loop that increments the work_buff_device
+    // q.submit([&] (handler& h){
 
-    // Copy the key_array to the device
-    q.memcpy(key_array_device, key_array, SIZE_OF_BUFFERS * sizeof(INT_TYPE));
+    //     // Accessors
+    //     auto key_array_acc = key_array_buf.get_access<access_mode::read>(h);
+    //     auto work_buff_acc = work_buff_buf.get_access<access_mode::read_write>(h);
 
-    // Create a range for the number of items
-    range<1> num_items(NUM_KEYS);
+    //     h.parallel_for(num_items, [=] (id<1> i){
+    //         auto v = atomic_ref<int, memory_order::relaxed, memory_scope::device, access::address_space::global_space>(work_buff_acc[key_array_acc[i] >> shift]);
+    //         v.fetch_add(1);
+    //     });
+    // });
+    // q.wait();
 
-    // Submit the kernel with a parallel for loop that increments the work_buff_device
-    q.submit([&] (handler& h){
-        h.parallel_for(num_items, [=] (id<1> i){
-            work_buff_device[key_array_device[i] >> shift]++;
-        });
-    });
-    q.wait();
-
-    // Copy the work_buff_device back to the host
-    q.memcpy(work_buff, work_buff_device, NUM_BUCKETS * sizeof(INT_TYPE)).wait();
-
-    // Free the device memory
-    free(work_buff_device, q);
-    free(key_array_device, q);
-
+    // sycl::host_accessor h_a(work_buff_buf);
+    // work_buff = &h_a[0];
+    // bucket_size[myid] = work_buff;
+    
     /* END OF SYCL CODE */
+
+    INT_TYPE toTest = 0;
+    printf("work_buff[%d]: %d\n", toTest, work_buff[toTest]);
+    printf("bucket_size[0][%d]: %d\n", toTest, bucket_size[0][toTest]);
+    printf("key_array[%d]: %d\n", NUM_KEYS - 1, key_array[NUM_KEYS - 1]);
 
 /*  Accumulative bucket sizes are the bucket pointers.
     These are global sizes accumulated upon to each bucket */
