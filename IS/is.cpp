@@ -253,7 +253,7 @@ long     D_test_index_array[TEST_ARRAY_SIZE] =
 /***********************/
 double	randlc( double *X, double *A );
 
-void full_verify( void );
+void full_verify( sycl::queue& q );
 
 void c_print_results( char   *name,
                       char   class_,
@@ -276,6 +276,7 @@ void c_print_results( char   *name,
 
 #include "../common/c_timers.h"
 
+const INT_TYPE toTest = NUM_BUCKETS;
 
 /*
  *    FUNCTION RANDLC (X, A)
@@ -491,7 +492,7 @@ void *alloc_mem( size_t size )
     return p;
 }
 
-void alloc_key_buff( void )
+void alloc_key_buff( sycl::queue& q )
 {
     INT_TYPE i;
     int      num_threads = 1;
@@ -514,14 +515,14 @@ void alloc_key_buff( void )
     */
    
     /* --- SYCL CODE --- */
-    queue q(gpu_selector_v);
     
-    INT_TYPE *key_buff2_device = malloc_device<INT_TYPE>(SIZE_OF_BUFFERS, q); 
-    range<1> num_items(SIZE_OF_BUFFERS);
-
+    INT_TYPE *key_buff2_device = malloc_device<INT_TYPE>(SIZE_OF_BUFFERS, q);
+    q.memcpy(key_buff2_device, key_buff2, SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
+    
+    range<1> num_items(NUM_KEYS);
     q.submit([&] (handler& h){
         h.parallel_for(num_items, [=] (id<1> i){
-            key_buff2_device[i]=0;
+            key_buff2_device[i[0]]=0;
         });
     });
     q.wait();
@@ -548,7 +549,7 @@ void alloc_key_buff( void )
 /*****************************************************************/
 
 
-void full_verify( void )
+void full_verify(sycl::queue& q)
 {
     INT_TYPE   i, j;
     INT_TYPE   k, k1, k2;
@@ -561,57 +562,60 @@ void full_verify( void )
 #ifdef USE_BUCKETS
 
 /* Buckets are already sorted.  Sorting keys within each bucket */
-/*
-#ifdef SCHED_CYCLIC
-    #pragma omp parallel for private(i,j,k,k1) schedule(static,1)
-#else
-    #pragma omp parallel for private(i,j,k,k1) schedule(dynamic)
-#endif
-    for( j=0; j< NUM_BUCKETS; j++ ) {
 
-        k1 = (j > 0)? bucket_ptrs[j-1] : 0;
-        for ( i = k1; i < bucket_ptrs[j]; i++ ) {
-            k = --key_buff_ptr_global[key_buff2[i]];
-            key_array[k] = key_buff2[i];
-        }
-    }
-    */
+// #ifdef SCHED_CYCLIC
+//     #pragma omp parallel for private(i,j,k,k1) schedule(static,1)
+// #else
+//     #pragma omp parallel for private(i,j,k,k1) schedule(dynamic)
+// #endif
+//     for( j=0; j< NUM_BUCKETS; j++ ) {
+
+//         k1 = (j > 0)? bucket_ptrs[j-1] : 0;
+//         for ( i = k1; i < bucket_ptrs[j]; i++ ) {
+//             k = --key_buff_ptr_global[key_buff2[i]];
+//             key_array[k] = key_buff2[i];
+//         }
+//     }
 
     /* --- SYCL CODE --- */
-    // TODO: check if correct & if it works
-    queue q(gpu_selector_v);
     
-    INT_TYPE *key_array_device = malloc_device<INT_TYPE>(SIZE_OF_BUFFERS, q); 
-    
-    INT_TYPE *bucket_ptrs_device = malloc_device<INT_TYPE>(NUM_BUCKETS, q);
-    q.memcpy(bucket_ptrs_device, bucket_ptrs, NUM_BUCKETS * sizeof(INT_TYPE)).wait();
+    buffer<INT_TYPE> bucket_ptrs_buf(bucket_ptrs, range<1>(NUM_BUCKETS));
+    buffer<INT_TYPE> key_buff2_buf(key_buff2, range<1>(SIZE_OF_BUFFERS));
+    buffer<INT_TYPE> key_buff_ptr_global_buf(key_buff_ptr_global, range<1>(MAX_KEY));
+    buffer<INT_TYPE> key_array_buf(key_array, range<1>(SIZE_OF_BUFFERS));
 
-    INT_TYPE *key_buff_ptr_global_device = malloc_device<INT_TYPE>(MAX_KEY, q);
-    q.memcpy(key_buff_ptr_global_device, key_buff_ptr_global, MAX_KEY * sizeof(INT_TYPE)).wait();
-
-    INT_TYPE *key_buff2_device = malloc_device<INT_TYPE>(MAX_KEY, q);
-    q.memcpy(key_buff_ptr_global_device, key_buff_ptr_global, MAX_KEY * sizeof(INT_TYPE)).wait();
 
 
     range<1> num_iterations(NUM_BUCKETS);
-
     q.submit([&] (handler& h){
+        
+        auto bucket_ptrs_acc = bucket_ptrs_buf.get_access<access::mode::read>(h);
+        auto key_buff2_acc = key_buff2_buf.get_access<access::mode::read>(h);
+        auto key_buff_ptr_global_acc = key_buff_ptr_global_buf.get_access<access::mode::read_write>(h);
+        auto key_array_acc = key_array_buf.get_access<access::mode::read_write>(h);
+        
         h.parallel_for(num_iterations, [=] (id<1> j){
-            INT_TYPE k, k1;
-            k1 = (j > 0)? bucket_ptrs_device[j-1] : 0;
-            for ( INT_TYPE i = k1; i < bucket_ptrs_device[j]; i++ ) {
-                k = --key_buff_ptr_global_device[key_buff2_device[i]];
-                key_array_device[k] = key_buff2_device[i];
+            INT_TYPE k1 = (j[0] > 0) ? bucket_ptrs_acc[j[0] - 1] : 0;
+            for (INT_TYPE i = k1; i < bucket_ptrs_acc[j]; i++) {
+                int index = key_buff2_acc[i];
+                auto atomic_obj = atomic_ref<int, memory_order::relaxed, memory_scope::device, access::address_space::global_space>(key_buff_ptr_global_acc[index]);
+                atomic_obj.fetch_add(-1);
+                int k = atomic_obj;
+                auto atomic_obj_key_array = atomic_ref<int, memory_order::relaxed, memory_scope::device, access::address_space::global_space>(key_array_acc[k]);
+                atomic_obj_key_array.store(key_buff2_acc[i]);
             }
         });
+
     });
     q.wait();
 
-    q.memcpy(key_array, key_array_device, SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
-    q.memcpy(key_buff_ptr_global, key_buff_ptr_global_device, MAX_KEY * sizeof(INT_TYPE)).wait();
-    free(key_array_device, q);
-    free(key_buff_ptr_global_device, q);
-    free(key_buff2_device, q);
+    // TODO: this part of copying back to the host can be omitted as subsequent operations (sum computation) is still done on the device
+    // sycl::host_accessor key_buff_ptr_global_a(key_buff_ptr_global_buf);
+    // sycl::host_accessor key_array_acc_a(key_array_buf);
+
+    // key_buff_ptr_global = &key_buff_ptr_global_a[0];
+    // q.memcpy(key_array, &key_array_acc_a[0], SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
+
     /* END OF SYCL CODE*/
 
 #else /*USE_BUCKETS disabled*/
@@ -658,15 +662,15 @@ void full_verify( void )
 
     buffer<INT_TYPE> sumBuf { &j, 1 };
 
-    buffer<INT_TYPE> key_array_buf{key_array, range<1>(NUM_KEYS)};
+    // buffer<INT_TYPE> key_array_buf{key_array, range<1>(NUM_KEYS)};
 
-    q.submit([&](handler& cgh) {
-        auto key_array_acc = key_array_buf.get_access<access_mode::read>(cgh);
+    q.submit([&](handler& h) {
+        auto key_array_acc = key_array_buf.get_access<access_mode::read>(h);
 
-        auto sumReduction = reduction(sumBuf, cgh, plus<>());
+        auto sumReduction = reduction(sumBuf, h, plus<>());
 
-        cgh.parallel_for(range<1> { NUM_KEYS - 1}, sumReduction, [=](id<1> i, auto& sum) {
-            if(key_array_acc[i]>key_array_acc[i+1]){
+        h.parallel_for(range<1> { NUM_KEYS - 1}, sumReduction, [=](id<1> i, auto& sum) {
+            if(key_array_acc[i[0]]>key_array_acc[i[0]+1]){
                 sum += 1;
             }
         });
@@ -693,7 +697,7 @@ void full_verify( void )
 /*****************************************************************/
 
 
-void rank( int iteration )
+void rank( int iteration, sycl::queue& q )
 {
 
     INT_TYPE    i, k;
@@ -747,46 +751,43 @@ void rank( int iteration )
         work_buff[i] = 0;
 
 /*  Determine the number of keys in each bucket */
-    #pragma omp for schedule(static)
-    for( i=0; i<NUM_KEYS; i++ )
-        work_buff[key_array[i] >> shift]++;
+    // #pragma omp for schedule(static)
+    // for( i=0; i<NUM_KEYS; i++ )
+    //     work_buff[key_array[i] >> shift]++;
 
     /* --- SYCL CODE --- */
 
-    // Create a q queue
-    // queue q(gpu_selector_v);
+    // Buffers for arrays
+    buffer<INT_TYPE> key_array_buf{key_array, range<1>(SIZE_OF_BUFFERS)};
+    buffer<INT_TYPE> work_buff_buf{work_buff, range<1>(NUM_BUCKETS)};
 
-    // // Buffers for arrays
-    // buffer<INT_TYPE> key_array_buf{key_array, range<1>(SIZE_OF_BUFFERS)};
-    // buffer<INT_TYPE> work_buff_buf{work_buff, range<1>(NUM_BUCKETS)};
+    // Create a range for the number of items
+    range<1> num_items(NUM_KEYS);
 
-    // // Create a range for the number of items
-    // range<1> num_items(NUM_KEYS);
+    // Submit the kernel with a parallel for loop that increments the work_buff_device
+    q.submit([&] (handler& h){
 
-    // // Submit the kernel with a parallel for loop that increments the work_buff_device
-    // q.submit([&] (handler& h){
+        // Accessors
+        auto key_array_acc = key_array_buf.get_access<access_mode::read>(h);
+        auto work_buff_acc = work_buff_buf.get_access<access_mode::read_write>(h);
 
-    //     // Accessors
-    //     auto key_array_acc = key_array_buf.get_access<access_mode::read>(h);
-    //     auto work_buff_acc = work_buff_buf.get_access<access_mode::read_write>(h);
+        h.parallel_for(num_items, [=] (id<1> i){
+            auto v = atomic_ref<INT_TYPE, memory_order::relaxed, memory_scope::device, access::address_space::global_space>(work_buff_acc[key_array_acc[i[0]] >> shift]);
+            v.fetch_add(1);
+        });
+    });
+    q.wait();
 
-    //     h.parallel_for(num_items, [=] (id<1> i){
-    //         auto v = atomic_ref<int, memory_order::relaxed, memory_scope::device, access::address_space::global_space>(work_buff_acc[key_array_acc[i] >> shift]);
-    //         v.fetch_add(1);
-    //     });
-    // });
-    // q.wait();
-
-    // sycl::host_accessor h_a(work_buff_buf);
-    // work_buff = &h_a[0];
-    // bucket_size[myid] = work_buff;
+    sycl::host_accessor h_a(work_buff_buf);
+    work_buff = &h_a[0];
+    q.memcpy(bucket_size[myid], work_buff, NUM_BUCKETS * sizeof(INT_TYPE));
     
     /* END OF SYCL CODE */
 
-    INT_TYPE toTest = 0;
-    printf("work_buff[%d]: %d\n", toTest, work_buff[toTest]);
-    printf("bucket_size[0][%d]: %d\n", toTest, bucket_size[0][toTest]);
-    printf("key_array[%d]: %d\n", NUM_KEYS - 1, key_array[NUM_KEYS - 1]);
+    // INT_TYPE toTest = 127;
+    // printf("work_buff[%d]: %d\n", toTest, work_buff[toTest]);
+    // printf("bucket_size[0][%d]: %d\n", toTest, bucket_size[0][toTest]);
+    // printf("key_array[%d]: %d\n", NUM_KEYS - 1, key_array[NUM_KEYS - 1]);
 
 /*  Accumulative bucket sizes are the bucket pointers.
     These are global sizes accumulated upon to each bucket */
@@ -993,6 +994,8 @@ void rank( int iteration )
 int main( int argc, char **argv )
 {
 
+    queue q(gpu_selector_v);
+
     int             i, iteration, timer_on;
 
     double          timecounter;
@@ -1063,13 +1066,13 @@ int main( int argc, char **argv )
     create_seq( 314159265.00,                    /* Random number gen seed */
                 1220703125.00 );                 /* Random number gen mult */
 
-    alloc_key_buff();
+    alloc_key_buff(q);
     if (timer_on) timer_stop( 1 );
 
 
 /*  Do one interation for free (i.e., untimed) to guarantee initialization of  
     all data and code pages and respective tables */
-    rank( 1 );  
+    rank( 1, q);  
 
 /*  Start verification counter */
     passed_verification = 0;
@@ -1084,7 +1087,7 @@ int main( int argc, char **argv )
     for( iteration=1; iteration<=MAX_ITERATIONS; iteration++ )
     {
         if( CLASS != 'S' ) printf( "        %d\n", iteration );
-        rank( iteration );
+        rank( iteration, q );
     }
 
 
@@ -1096,7 +1099,7 @@ int main( int argc, char **argv )
 /*  This tests that keys are in sequence: sorting of last ranked key seq
     occurs here, but is an untimed operation                             */
     if (timer_on) timer_start( 2 );
-    full_verify();
+    full_verify(q);
     if (timer_on) timer_stop( 2 );
 
     if (timer_on) timer_stop( 3 );
