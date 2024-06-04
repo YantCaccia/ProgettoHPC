@@ -780,7 +780,7 @@ void rank( int iteration, sycl::queue& q )
 
     sycl::host_accessor h_a(work_buff_buf);
     work_buff = &h_a[0];
-    q.memcpy(bucket_size[myid], work_buff, NUM_BUCKETS * sizeof(INT_TYPE));
+    q.memcpy(bucket_size[myid], work_buff, NUM_BUCKETS * sizeof(INT_TYPE)).wait();
     
     /* END OF SYCL CODE */
 
@@ -805,12 +805,42 @@ void rank( int iteration, sycl::queue& q )
 
 
 /*  Sort into appropriate bucket */
-    #pragma omp for schedule(static)
-    for( i=0; i<NUM_KEYS; i++ )  
-    {
-        k = key_array[i];
-        key_buff2[bucket_ptrs[k >> shift]++] = k;
-    }
+    // #pragma omp for schedule(static)
+    // for( i=0; i<NUM_KEYS; i++ )  
+    // {
+    //     k = key_array[i];
+    //     key_buff2[bucket_ptrs[k >> shift]++] = k;
+    // }
+
+    /* --- SYCL CODE --- */
+    buffer<INT_TYPE> bucket_ptrs_buf(bucket_ptrs, range<1>(NUM_BUCKETS));
+    buffer<INT_TYPE> key_buff2_buf(key_buff2, range<1>(SIZE_OF_BUFFERS));
+
+    q.submit([&] (handler& h){
+        auto key_array_acc = key_array_buf.get_access<access::mode::read>(h);
+        auto bucket_ptrs_acc = bucket_ptrs_buf.get_access<access::mode::read_write>(h);
+        auto key_buff2_acc = key_buff2_buf.get_access<access::mode::read_write>(h);
+
+        h.parallel_for(range<1>(NUM_KEYS), [=](id<1> i) {
+            INT_TYPE k = key_array_acc[i];
+            auto atomic_bucket_ptr = atomic_ref<INT_TYPE, memory_order::relaxed, memory_scope::device, access::address_space::global_space>(bucket_ptrs_acc[k >> shift]);
+            INT_TYPE index = atomic_bucket_ptr.fetch_add(1);
+        
+            auto atomic_key_buff2 = atomic_ref<INT_TYPE, memory_order::relaxed, memory_scope::device, access::address_space::global_space>(key_buff2_acc[index]);
+            atomic_key_buff2.store(k);
+        });
+
+    }).wait();
+
+    // bucket_ptrs back to the host
+    host_accessor bucket_ptrs_a(bucket_ptrs_buf);
+    q.memcpy(bucket_ptrs, &bucket_ptrs_a[0], NUM_BUCKETS * sizeof(INT_TYPE)).wait();
+    
+    // key_buff2 back to the host
+    host_accessor key_buff2_a(key_buff2_buf);
+    q.memcpy(key_buff2, &key_buff2_a[0], SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
+
+    /* END OF SYCL CODE */
 
 /*  The bucket pointers now point to the final accumulated sizes */
     if (myid < num_threads-1) {
