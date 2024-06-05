@@ -784,10 +784,6 @@ void rank( int iteration, sycl::queue& q )
     
     /* END OF SYCL CODE */
 
-    // INT_TYPE toTest = 127;
-    // printf("work_buff[%d]: %d\n", toTest, work_buff[toTest]);
-    // printf("bucket_size[0][%d]: %d\n", toTest, bucket_size[0][toTest]);
-    // printf("key_array[%d]: %d\n", NUM_KEYS - 1, key_array[NUM_KEYS - 1]);
 
 /*  Accumulative bucket sizes are the bucket pointers.
     These are global sizes accumulated upon to each bucket */
@@ -832,14 +828,17 @@ void rank( int iteration, sycl::queue& q )
 
     }).wait();
 
-    // bucket_ptrs back to the host
-    host_accessor bucket_ptrs_a(bucket_ptrs_buf);
-    q.memcpy(bucket_ptrs, &bucket_ptrs_a[0], NUM_BUCKETS * sizeof(INT_TYPE)).wait();
-    
-    // key_buff2 back to the host
-    host_accessor key_buff2_a(key_buff2_buf);
-    q.memcpy(key_buff2, &key_buff2_a[0], SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
+    // bucket_ptrs back to the host - {} are needed to determine the scope and destroy the host_accessor after its use
+    {
+        host_accessor bucket_ptrs_a(bucket_ptrs_buf);
+        q.memcpy(bucket_ptrs, &bucket_ptrs_a[0], NUM_BUCKETS * sizeof(INT_TYPE)).wait();
+    }
 
+    // key_buff2 back to the host
+    {
+        host_accessor key_buff2_a(key_buff2_buf);
+        q.memcpy(key_buff2, &key_buff2_a[0], SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
+    }
     /* END OF SYCL CODE */
 
 /*  The bucket pointers now point to the final accumulated sizes */
@@ -855,37 +854,73 @@ void rank( int iteration, sycl::queue& q )
     of the number of keys in the buckets is Gaussian, the use of
     a dynamic schedule should improve load balance, thus, performance     */
 
-#ifdef SCHED_CYCLIC
-    #pragma omp for schedule(static,1)
-#else
-    #pragma omp for schedule(dynamic)
-#endif
-    for( i=0; i< NUM_BUCKETS; i++ ) {
+// #ifdef SCHED_CYCLIC
+//     #pragma omp for schedule(static,1)
+// #else
+//     #pragma omp for schedule(dynamic)
+// #endif
+//     for( i=0; i< NUM_BUCKETS; i++ ) {
 
-/*  Clear the work array section associated with each bucket */
-        k1 = i * num_bucket_keys;
-        k2 = k1 + num_bucket_keys;
-        for ( k = k1; k < k2; k++ )
-            key_buff_ptr[k] = 0;
+// /*  Clear the work array section associated with each bucket */
+//         k1 = i * num_bucket_keys;
+//         k2 = k1 + num_bucket_keys;
+//         for ( k = k1; k < k2; k++ )
+//             key_buff_ptr[k] = 0;
 
-/*  Ranking of all keys occurs in this section:                 */
+// /*  Ranking of all keys occurs in this section:                 */
 
-/*  In this section, the keys themselves are used as their 
-    own indexes to determine how many of each there are: their
-    individual population                                       */
-        m = (i > 0)? bucket_ptrs[i-1] : 0;
-        for ( k = m; k < bucket_ptrs[i]; k++ )
-            key_buff_ptr[key_buff_ptr2[k]]++;  /* Now they have individual key   */
-                                       /* population                     */
+// /*  In this section, the keys themselves are used as their 
+//     own indexes to determine how many of each there are: their
+//     individual population                                       */
+//         m = (i > 0)? bucket_ptrs[i-1] : 0;
+//         for ( k = m; k < bucket_ptrs[i]; k++ )
+//             key_buff_ptr[key_buff_ptr2[k]]++;  /* Now they have individual key   */
+//                                        /* population                     */
 
-/*  To obtain ranks of each key, successively add the individual key
-    population, not forgetting to add m, the total of lesser keys,
-    to the first key population                                          */
-        key_buff_ptr[k1] += m;
-        for ( k = k1+1; k < k2; k++ )
-            key_buff_ptr[k] += key_buff_ptr[k-1];
+// /*  To obtain ranks of each key, successively add the individual key
+//     population, not forgetting to add m, the total of lesser keys,
+//     to the first key population                                          */
+//         key_buff_ptr[k1] += m;
+//         for ( k = k1+1; k < k2; k++ )
+//             key_buff_ptr[k] += key_buff_ptr[k-1];
 
-    }
+//     }
+
+    /* --- SYCL CODE --- */
+    
+    buffer<INT_TYPE> key_buff_ptr_buf(key_buff_ptr, range<1>(MAX_KEY));
+    buffer<INT_TYPE> key_buff_ptr2_buf(key_buff_ptr2, range<1>(SIZE_OF_BUFFERS));
+
+    q.submit([&](handler& h) {
+        // Accessors
+        auto key_buff_ptr_acc = key_buff_ptr_buf.get_access<access::mode::read_write>(h);
+        auto key_buff_ptr2_acc = key_buff_ptr2_buf.get_access<access::mode::read>(h);
+        auto bucket_ptrs_acc = bucket_ptrs_buf.get_access<access::mode::read>(h);
+
+        h.parallel_for(range<1>(NUM_BUCKETS), [=](id<1> i) {
+            // Each work-item handles one bucket
+            int k1 = i * num_bucket_keys;
+            int k2 = k1 + num_bucket_keys;
+
+            // Clear the work array section associated with each bucket
+            for (int k = k1; k < k2; k++) {
+                key_buff_ptr_acc[k] = 0;
+            }
+
+            // Ranking of all keys occurs in this section
+            int m = (i > 0) ? bucket_ptrs_acc[i - 1] : 0;
+            for (int k = m; k < bucket_ptrs_acc[i]; k++) {
+                key_buff_ptr_acc[key_buff_ptr2_acc[k]]++;
+            }
+
+            // Obtain ranks of each key (sequential within each work-item)
+            key_buff_ptr_acc[k1] += m;
+            for (int k = k1 + 1; k < k2; k++) {
+                key_buff_ptr_acc[k] += key_buff_ptr_acc[k - 1];
+            }
+        });
+    }).wait();
+    /* END OF SYCL CODE */
 
 #else /*USE_BUCKETS*/
 
