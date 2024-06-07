@@ -60,7 +60,7 @@ using namespace sycl;
 /* Example:  SGI O2000:   400% slowdown with buckets (Wow!)      */
 /*****************************************************************/
 /* To disable the use of buckets, comment out the following line */
-#define USE_BUCKETS
+ #define USE_BUCKETS
 
 /* Uncomment below for cyclic schedule */
 /*#define SCHED_CYCLIC*/
@@ -619,12 +619,32 @@ void full_verify(sycl::queue& q)
     /* END OF SYCL CODE*/
 
 #else /*USE_BUCKETS disabled*/
+    /* --- SYCL CODE --- */
+    {
+        buffer<INT_TYPE> key_array_buf{key_array, range<1>(SIZE_OF_BUFFERS)};
+        buffer<INT_TYPE> key_buff2_buf{key_buff2, range<1>(SIZE_OF_BUFFERS)};
+        
+        range<1> num_iterations(NUM_KEYS);
+
+        q.submit([&] (handler& h){
+            auto key_buff2_acc = key_buff2_buf.get_access<access::mode::read_write>(h);
+            auto key_array_acc = key_array_buf.get_access<access::mode::read>(h);
+            
+            h.parallel_for(num_iterations, [=] (item<1> i){
+                key_buff2_acc[i[0]]=key_array_acc[i[0]];
+            });
+        });
+        q.wait();
+        host_accessor key_buff2_acc_a(key_buff2_buf);
+        q.memcpy(key_buff2, &key_buff2_acc_a[0], SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
+    }
+    /* END OF SYCL CODE*/
 
 #pragma omp parallel private(i,j,k,k1,k2)
   {
-    #pragma omp for
-    for( i=0; i<NUM_KEYS; i++ )
-        key_buff2[i] = key_array[i];
+    // #pragma omp for
+    // for( i=0; i<NUM_KEYS; i++ )
+    //     key_buff2[i] = key_array[i];
 
     /* This is actual sorting. Each thread is responsible for 
        a subset of key values */
@@ -647,12 +667,14 @@ void full_verify(sycl::queue& q)
     }
   } /*omp parallel*/
 
+    // key_array_buf will be used for the next parallel for loop
+    buffer<INT_TYPE> key_array_buf{key_array, range<1>(NUM_KEYS)};
 #endif
 
 
 /*  Confirm keys correctly sorted: count incorrectly sorted keys, if any */
 
-    // j = 0;
+    j = 0;
     // #pragma omp parallel for reduction(+:j)
     // for( i=1; i<NUM_KEYS; i++ )
     //     if( key_array[i-1] > key_array[i] )
@@ -660,9 +682,9 @@ void full_verify(sycl::queue& q)
     
     /* --- SYCL CODE --- */
 
-    buffer<INT_TYPE> sumBuf { &j, 1 };
+   buffer<INT_TYPE> sumBuf { &j, 1 };
 
-    // buffer<INT_TYPE> key_array_buf{key_array, range<1>(NUM_KEYS)};
+    //buffer<INT_TYPE> key_array_buf{key_array, range<1>(NUM_KEYS)};
 
     q.submit([&](handler& h) {
         auto key_array_acc = key_array_buf.get_access<access_mode::read>(h);
@@ -939,20 +961,42 @@ void rank( int iteration, sycl::queue& q )
     own indexes to determine how many of each there are: their
     individual population                                       */
 
-    #pragma omp for nowait schedule(static)
-    for( i=0; i<NUM_KEYS; i++ )
-        work_buff[key_buff_ptr2[i]]++;  /* Now they have individual key   */
+    // #pragma omp for nowait schedule(static)
+    // for( i=0; i<NUM_KEYS; i++ )
+    //     work_buff[key_buff_ptr2[i]]++;  /* Now they have individual key   */
                                        /* population                     */
+    
+    /* --- SYCL CODE --- */
+    
+    buffer<INT_TYPE> work_buff_buf{work_buff, range<1>(MAX_KEY)};
+    buffer<INT_TYPE> key_buff_ptr2_buf{key_buff_ptr2, range<1>(SIZE_OF_BUFFERS)};
+
+    range<1> num_iterations(NUM_KEYS);
+    q.submit([&] (handler& h){
+        auto work_buff_acc = work_buff_buf.get_access<access_mode::read_write>(h); 
+        auto key_buff_ptr2_acc = key_buff_ptr2_buf.get_access<access_mode::read>(h);
+
+        h.parallel_for(num_iterations, [=] (item<1> i){
+            auto atomic_work_buff = atomic_ref<INT_TYPE, memory_order::relaxed, memory_scope::device, access::address_space::global_space>(work_buff_acc[key_buff_ptr2_acc[i[0]]]);
+            atomic_work_buff.fetch_add(1);
+        });
+    });
+    q.wait();
+    sycl::host_accessor h_a(work_buff_buf);
+    work_buff = &h_a[0];
+    q.memcpy(key_buff1_aptr[myid], work_buff, MAX_KEY * sizeof(INT_TYPE)).wait();
+    
+    /* END OF SYCL CODE */
 
 /*  To obtain ranks of each key, successively add the individual key
-    population                                          */
-
-    for( i=0; i<MAX_KEY-1; i++ )   
-        work_buff[i+1] += work_buff[i];
+    population                                          */   
+     for( i=0; i<MAX_KEY-1; i++ )   
+         work_buff[i+1] += work_buff[i];
 
     #pragma omp barrier
 
 /*  Accumulate the global key population */
+// It will never be executed, the number of threads is equal to 1
     for( k=1; k<num_threads; k++ ) {
         #pragma omp for nowait schedule(static)
         for( i=0; i<MAX_KEY; i++ )
