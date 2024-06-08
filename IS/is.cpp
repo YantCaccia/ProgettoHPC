@@ -60,7 +60,7 @@ using namespace sycl;
 /* Example:  SGI O2000:   400% slowdown with buckets (Wow!)      */
 /*****************************************************************/
 /* To disable the use of buckets, comment out the following line */
- #define USE_BUCKETS
+   #define USE_BUCKETS
 
 /* Uncomment below for cyclic schedule */
 /*#define SCHED_CYCLIC*/
@@ -619,56 +619,81 @@ void full_verify(sycl::queue& q)
     /* END OF SYCL CODE*/
 
 #else /*USE_BUCKETS disabled*/
+
+// #pragma omp parallel private(i,j,k,k1,k2)
+//   {
+//     #pragma omp for
+//     for( i=0; i<NUM_KEYS; i++ )
+//         key_buff2[i] = key_array[i];
+
+//     /* This is actual sorting. Each thread is responsible for 
+//        a subset of key values */
+// #ifdef _OPENMP
+//     j = omp_get_num_threads();
+//     j = (MAX_KEY + j - 1) / j;
+//     k1 = j * omp_get_thread_num();
+// #else
+//     j = MAX_KEY;
+//     k1 = 0;
+// #endif
+//     k2 = k1 + j;
+//     if (k2 > MAX_KEY) k2 = MAX_KEY;
+
+//     for( i=0; i<NUM_KEYS; i++ ) {
+//         if (key_buff2[i] >= k1 && key_buff2[i] < k2) {
+//             k = --key_buff_ptr_global[key_buff2[i]];
+//             if(k==0)
+//                 printf("key_buff2:%d, i:%d\n", key_buff2[i], i);
+//             key_array[k] = key_buff2[i];
+//         }
+//     }
+//   } /*omp parallel*/    
+
+    
     /* --- SYCL CODE --- */
-    {
-        buffer<INT_TYPE> key_array_buf{key_array, range<1>(SIZE_OF_BUFFERS)};
-        buffer<INT_TYPE> key_buff2_buf{key_buff2, range<1>(SIZE_OF_BUFFERS)};
+    // First for
+    buffer<INT_TYPE> key_array_buf{key_array, range<1>(SIZE_OF_BUFFERS)};
+    buffer<INT_TYPE> key_buff2_buf{key_buff2, range<1>(SIZE_OF_BUFFERS)};
+    
+    range<1> num_iterations(NUM_KEYS);
+    
+    q.submit([&] (handler& h){
+        auto key_buff2_acc = key_buff2_buf.get_access<access::mode::read_write>(h);
+        auto key_array_acc = key_array_buf.get_access<access::mode::read>(h);
         
-        range<1> num_iterations(NUM_KEYS);
-
-        q.submit([&] (handler& h){
-            auto key_buff2_acc = key_buff2_buf.get_access<access::mode::read_write>(h);
-            auto key_array_acc = key_array_buf.get_access<access::mode::read>(h);
-            
-            h.parallel_for(num_iterations, [=] (item<1> i){
-                key_buff2_acc[i[0]]=key_array_acc[i[0]];
-            });
+        h.parallel_for(num_iterations, [=] (item<1> i){
+            key_buff2_acc[i[0]]=key_array_acc[i[0]];
         });
-        q.wait();
-        host_accessor key_buff2_acc_a(key_buff2_buf);
-        q.memcpy(key_buff2, &key_buff2_acc_a[0], SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
-    }
-    /* END OF SYCL CODE*/
-
-#pragma omp parallel private(i,j,k,k1,k2)
-  {
-    // #pragma omp for
-    // for( i=0; i<NUM_KEYS; i++ )
-    //     key_buff2[i] = key_array[i];
-
-    /* This is actual sorting. Each thread is responsible for 
-       a subset of key values */
-#ifdef _OPENMP
-    j = omp_get_num_threads();
-    j = (MAX_KEY + j - 1) / j;
-    k1 = j * omp_get_thread_num();
-#else
-    j = MAX_KEY;
+    });
+    q.wait();   
+    
+    // Second for
     k1 = 0;
-#endif
-    k2 = k1 + j;
-    if (k2 > MAX_KEY) k2 = MAX_KEY;
+    k2 = MAX_KEY;
 
-    for( i=0; i<NUM_KEYS; i++ ) {
-        if (key_buff2[i] >= k1 && key_buff2[i] < k2) {
-            k = --key_buff_ptr_global[key_buff2[i]];
-            key_array[k] = key_buff2[i];
-        }
-    }
-  } /*omp parallel*/
+    buffer<INT_TYPE> key_buff_ptr_global_buf(key_buff_ptr_global, range<1>(MAX_KEY));
 
-    // key_array_buf will be used for the next parallel for loop
-    buffer<INT_TYPE> key_array_buf{key_array, range<1>(NUM_KEYS)};
+    q.submit([&] (handler& h){
+        
+        auto key_buff2_acc = key_buff2_buf.get_access<access::mode::read>(h);
+        auto key_buff_ptr_global_acc = key_buff_ptr_global_buf.get_access<access::mode::read_write>(h);
+        auto key_array_acc = key_array_buf.get_access<access::mode::read_write>(h);
+        
+        h.parallel_for(num_iterations, [=] (id<1> i){
+            if(key_buff2_acc[i[0]] >= k1 && key_buff2_acc[i[0]] < k2){
+                int index = key_buff2_acc[i[0]];
+                auto atomic_obj = atomic_ref<int, memory_order::relaxed, memory_scope::device, access::address_space::global_space>(key_buff_ptr_global_acc[index]);
+                INT_TYPE k = atomic_obj.fetch_add(-1);
+                k--;
+                auto atomic_obj_key_array = atomic_ref<int, memory_order::relaxed, memory_scope::device, access::address_space::global_space>(key_array_acc[k]);
+                atomic_obj_key_array.store(key_buff2_acc[i[0]]);
+            }
+        });
+    });
+    q.wait();
+
+    /* END OF SYCL CODE*/
+    
 #endif
 
 
@@ -677,8 +702,10 @@ void full_verify(sycl::queue& q)
     j = 0;
     // #pragma omp parallel for reduction(+:j)
     // for( i=1; i<NUM_KEYS; i++ )
-    //     if( key_array[i-1] > key_array[i] )
+    //     if( key_array[i-1] > key_array[i] ){
+    //         printf("i-1:%d, i:%d\nkey_array-1:%d, key_array:%d\n", i-1, i, key_array[i-1], key_array[i]);
     //         j++;
+    //     }
     
     /* --- SYCL CODE --- */
 
