@@ -1,1 +1,4 @@
 .vscode
+*.o
+IS/npbparams.h
+sys/setparams

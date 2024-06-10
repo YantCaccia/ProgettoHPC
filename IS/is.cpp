@@ -316,39 +316,41 @@ const INT_TYPE toTest = NUM_BUCKETS;
 /*************    portable random number generator    ************/
 /*****************************************************************/
 
-static int      KS=0;
-static double	R23, R46, T23, T46;
-#pragma omp threadprivate(KS, R23, R46, T23, T46)
+//static int      KS=0;
+//static double	R23, R46, T23, T46;
+//#pragma omp threadprivate(KS, R23, R46, T23, T46)
 
-double	randlc( double *X, double *A )
-{
-      double		T1, T2, T3, T4;
-      double		A1;
-      double		A2;
-      double		X1;
-      double		X2;
-      double		Z;
-      int     		i, j;
+SYCL_EXTERNAL double	randlc( double *X, double *A ){
+    int KS=0;
+    double	R23, R46, T23, T46;
 
-      if (KS == 0) 
-      {
-        R23 = 1.0;
-        R46 = 1.0;
-        T23 = 1.0;
-        T46 = 1.0;
-    
-        for (i=1; i<=23; i++)
-        {
-          R23 = 0.50 * R23;
-          T23 = 2.0 * T23;
-        }
-        for (i=1; i<=46; i++)
-        {
-          R46 = 0.50 * R46;
-          T46 = 2.0 * T46;
-        }
-        KS = 1;
-      }
+    double		T1, T2, T3, T4;
+    double		A1;
+    double		A2;
+    double		X1;
+    double		X2;
+    double		Z;
+    int     		i, j;
+
+    if (KS == 0) 
+    {
+    R23 = 1.0;
+    R46 = 1.0;
+    T23 = 1.0;
+    T46 = 1.0;
+
+    for (i=1; i<=23; i++)
+    {
+        R23 = 0.50 * R23;
+        T23 = 2.0 * T23;
+    }
+    for (i=1; i<=46; i++)
+    {
+        R46 = 0.50 * R46;
+        T46 = 2.0 * T46;
+    }
+    KS = 1;
+    }
 
 /*  Break A into two parts such that A = 2^23 * A1 + A2 and set X = N.  */
 
@@ -375,7 +377,7 @@ double	randlc( double *X, double *A )
       T4 = j;
       *X = T3 - T46 * T4;
       return(R46 * *X);
-} 
+}
 
 
 
@@ -437,7 +439,7 @@ double   find_my_seed( int kn,        /* my processor rank, 0<=kn<=num procs */
 
 void	create_seq( double seed, double a )
 {
-	double x, s;
+// 	double x, s;
 	INT_TYPE i, k;
 
 // #pragma omp parallel private(x,s,i,k)
