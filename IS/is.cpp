@@ -440,39 +440,72 @@ void	create_seq( double seed, double a )
 	double x, s;
 	INT_TYPE i, k;
 
-#pragma omp parallel private(x,s,i,k)
-    {
-	INT_TYPE k1, k2;
-	double an = a;
-	int myid = 0, num_threads = 1;
-        INT_TYPE mq;
+// #pragma omp parallel private(x,s,i,k)
+//     {
+// 	INT_TYPE k1, k2;
+// 	double an = a;
+// 	int myid = 0, num_threads = 1;
+//         INT_TYPE mq;
 
-#ifdef _OPENMP
-	myid = omp_get_thread_num();
-	num_threads = omp_get_num_threads();
-#endif
+// #ifdef _OPENMP
+// 	myid = omp_get_thread_num();
+// 	num_threads = omp_get_num_threads();
+// #endif
 
-	mq = (NUM_KEYS + num_threads - 1) / num_threads;
-	k1 = mq * myid;
-	k2 = k1 + mq;
-	if ( k2 > NUM_KEYS ) k2 = NUM_KEYS;
+// 	mq = (NUM_KEYS + num_threads - 1) / num_threads;
+// 	k1 = mq * myid;
+// 	k2 = k1 + mq;
+// 	if ( k2 > NUM_KEYS ) k2 = NUM_KEYS;
 
-	KS = 0;
-	s = find_my_seed( myid, num_threads,
-			  (long)4*NUM_KEYS, seed, an );
+// 	KS = 0;
+// 	s = find_my_seed( myid, num_threads,
+// 			  (long)4*NUM_KEYS, seed, an );
 
-        k = MAX_KEY/4;
+//         k = MAX_KEY/4;
 
-	for (i=k1; i<k2; i++)
-	{
-	    x = randlc(&s, &an);
-	    x += randlc(&s, &an);
-        x += randlc(&s, &an);
-	    x += randlc(&s, &an);  
+// 	for (i=k1; i<k2; i++)
+// 	{
+// 	    x = randlc(&s, &an);
+// 	    x += randlc(&s, &an);
+//         x += randlc(&s, &an);
+// 	    x += randlc(&s, &an);  
 
-        key_array[i] = k*x;
-	}
-    } /*omp parallel*/
+//         key_array[i] = k*x;
+// 	}
+//     } /*omp parallel*/
+    
+    /* --- SYCL CODE --- */
+    queue q(cpu_selector_v);
+
+	double *an;
+
+    an = malloc_shared<double>(1,q);
+    *an=a;
+
+
+    k = MAX_KEY/4;
+    int *key_array_device = malloc_device<INT_TYPE>(SIZE_OF_BUFFERS, q);
+    
+    q.submit([&] (handler& h){
+
+        h.parallel_for(range<1>{NUM_KEYS}, [=] (item<1> i) {
+            double local_s = find_my_seed( i, NUM_KEYS,
+                                    (long)4*NUM_KEYS, seed, *an); 
+            double x;
+            x = randlc(&local_s, an);
+	        x += randlc(&local_s, an);
+            x += randlc(&local_s, an);
+	        x += randlc(&local_s, an);
+            key_array_device[i] = k*x;
+        });
+    });
+    q.wait();
+
+    q.memcpy(key_array, key_array_device, SIZE_OF_BUFFERS * sizeof(INT_TYPE)).wait();
+
+    free(key_array_device, q);
+    free(an, q);
+    /* END OF SYCL CODE*/
 }
 
 
